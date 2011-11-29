@@ -868,11 +868,16 @@ saniList = [("&lt;", "<"),
             ("\\[/??[biu]\\]", "") --html [b] tags and such
            ]
 
+unSaniList = [("<", "&lt;"),
+              (">", "&gt;")
+             ]
+
+-- TODO replace < and > with html code
 -- replace all irc nicks with addonchat usernames
 unsanitizeIRCMessage :: BState -> String -> String
 unsanitizeIRCMessage state msg 
     | curRoom == Nothing = msg
-    | otherwise = foldl' rep msg (nameList room)
+    | otherwise = foldl' rep msg (unSaniList ++ (nameList room))
     where
       curRoom = myCurrentRoom state
       Just room = curRoom
