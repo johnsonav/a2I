@@ -371,7 +371,7 @@ addonCloseRoom state number rName
     | curRoom == Nothing = (newState, [])
     | rName == (roomName r) = (newState, (lineFun rName) ++ [IRCLine $ ":Mover NOTICE " ++
                                           (channelName state) ++ 
-                                          " :Now leaving " ++ rName]
+                                          " :Now closing " ++ rName]
                               )
     | otherwise = (newState, [])
     where
