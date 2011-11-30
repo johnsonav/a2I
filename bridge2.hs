@@ -369,9 +369,11 @@ colorsList = [(3, Gold), (0, Blue), (2, Red), (1, Green), (4, White)]
 addonCloseRoom :: BState -> Int -> String -> (BState, [Line])
 addonCloseRoom state number rName 
     | curRoom == Nothing = (newState, [])
-    | rName == (roomName r) = (newState, (lineFun rName) ++ [IRCLine $ ":Mover NOTICE " ++
+    | rName == (roomName r) = (newState, (lineFun rName) ++ 
+                                         [IRCLine $ ":Mover NOTICE " ++
                                           (channelName state) ++ 
-                                          " :Now closing " ++ rName]
+                                          " :Now closing room " ++ rName ++
+                                          " upon leaving."]
                               )
     | otherwise = (newState, [])
     where
