@@ -99,7 +99,8 @@ data BState = BState {myNick :: String,
                       usersInNoRoom :: [User],
 
                       --inPipe :: Chan Line,
-                      roomMove :: String
+                      roomMove :: String,
+                      echoUnhandled :: Bool
                      }
 
 main :: IO ()
@@ -197,7 +198,8 @@ initialBState pipe = do
                  timeZone = tz,
                  roomList = [],
                  usersInNoRoom = [],
-                 roomMove = ""
+                 roomMove = "",
+                 echoUnhandled = False
                 }
 
 {-Make HTTP connection for authentication and room list-}
@@ -307,6 +309,7 @@ processLine state b@(IRCLine l)
     | command == "WHO" = ircWho state l
     | command == "SIGNON" = ircSignon state l
     | command == "HOURS" = ircHours state l
+    | command == "UNHANDLEDTOGGLE" = ircUnhandledToggle state
     | otherwise = (state, [])
     where
       command = map toUpper (head $ (words l))
@@ -336,11 +339,28 @@ processLine state b@(AddonLine f0 f1 f2 f3 f4 f5 f6 f7 f8)
     | command == 10013 = addonCloseRoom state f1 f3 -- it's a time
     | command == 10110 = addonUserColor state f3 f1
     | command == 10048 = addonPMClose state f3
---    | command == 10015" = addonRoomClosedMessage state ((fields line)!!3) --room name
---    | command == 10048" = addonPMClose 
-    | otherwise = (state, [])
+    | command == 10029 = noAction -- user typing line
+    | command == 10012 = noAction -- addon ping response line
+    | otherwise = addonUnhandled state b
       where
+        noAction = (state, [])
         command = f0
+
+-- 13000 Logged on from phone client?
+
+
+-- write out unhandled addonLines to the IRC client, mostly good for logging
+-- tabs replaced with "::"
+addonUnhandled :: BState -> Line -> (BState, [Line])
+addonUnhandled state aLine = if (echoUnhandled state) 
+                             then
+                                 (state, [IRCLine $ toIRCLine aLine])
+                             else
+                                 (state, [])
+    where
+      toIRCLine l = ":UnhandledLine NOTICE " ++
+                    " :" ++
+                    (((S.join "|") . (S.split "\t")) (show l))
 
 addonPMClose :: BState -> AddonUserName -> (BState, [Line])
 addonPMClose state aName = (state, [IRCLine $ ":PMMonitor NOTICE " ++
@@ -671,6 +691,17 @@ addonSpeech state name body
     where
       stuff = ":" ++ (sanitizeName name) ++ " PRIVMSG " ++ 
               (channelName state) ++ " :" ++ (sanitizeAddonMessage state body)
+
+ircUnhandledToggle :: BState -> (BState, [Line])
+ircUnhandledToggle state = (state {echoUnhandled = newEcho},
+                            [IRCLine $ ":EchoUnhandled NOTICE :" ++ echoString])
+    where
+      newEcho = not $ echoUnhandled state
+      echoString = if newEcho
+                   then
+                       "Starting echoing unhandled lines."
+                   else
+                       "Stopping echoing unhandled lines."
 
 ircHours :: BState -> String -> (BState, [Line])
 ircHours state line = (state,
