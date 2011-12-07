@@ -2,6 +2,7 @@ import System.IO.Unsafe
 import Network
 import Network.HTTP
 import System.IO
+import qualified System.Exit as X
 import Control.Exception
 import Control.Concurrent
 import Data.List 
@@ -53,7 +54,9 @@ data BridgeMessage = AddonPingTime |
                      StartAddonPing | 
                      DoPing |
                      RoomRejoiner String Int |
-                     RejoinRoom String
+                     RejoinRoom String |
+                     AddonHandleClosed | 
+                     ExitClose
                      deriving (Show, Eq)
 
 data Line = BridgeLine BridgeMessage | 
@@ -144,7 +147,7 @@ writeLine inputPipe ircOutPipe addonOutPipe
   h <- connectTo aServer (PortNumber $ fromIntegral (aPort))
   hSetBuffering h LineBuffering
   forkIO (addonListener inputPipe h)
-  forkIO (addonSender addonOutPipe h)
+  forkIO (addonSender addonOutPipe inputPipe h)
   --writeChan pipe $ BridgeLine (AddonHandle h)
   return ()
 
@@ -181,6 +184,9 @@ writeLine inputPipe ircOutPipe addonOutPipe
               (BridgeLine (RoomRejoiner rName totalTimeClosed)) = 
                   forkIO (roomRejoiner inputPipe rName totalTimeClosed) >> 
                   return ()
+
+writeLine inputPipe ircOutPipe addonOutPipe (BridgeLine ExitClose) = 
+    X.exitWith X.ExitSuccess
 
 
 -- Make the initial BState, mostly filled with dumb values. Could read in
@@ -219,15 +225,21 @@ ircSender ircOutPipe ircHandle = do
           hPutStrLn ircHandle s
 
 -- listen to addonOutPipe and send.
-addonSender :: Chan Line -> Handle -> IO ()
-addonSender addonOutPipe addonHandle = do
+addonSender :: Chan Line -> Chan Line -> Handle -> IO ()
+addonSender addonOutPipe inputPipe addonHandle = do
   output <- getChanContents addonOutPipe
   sequence_ $ map fun output
       where
         fun line = do
           let s = show line
-          putStrLn $ "add<<" ++ s
-          hPutStrLn addonHandle s
+          isWritable <- hIsWritable addonHandle
+          if (not isWritable)
+           then
+              writeChan inputPipe (BridgeLine AddonHandleClosed)
+           else
+              do
+                putStrLn $ "add<<" ++ s
+                hPutStrLn addonHandle s
 
 -- listen for IRC traffic and pump down the pipe
 ircListener :: Chan Line -> Handle -> IO ()
@@ -299,6 +311,11 @@ processLine state (BridgeLine (RejoinRoom rName))
     | myCurrentRoom state == Nothing = (state, [AddonLine 73 0 0 etx rName etx 1 0 0])
     | otherwise = (state, [])
 
+processLine state (BridgeLine AddonHandleClosed) = 
+    (state,
+     [IRCLine ":AddonBridge NOTICE :Connection To AddonChat server lost.",
+      BridgeLine ExitClose])
+
 processLine state b@(IRCLine l)
     | command == "NICK" = ircNick state l
     | command == "PASS" = ircPass state l
@@ -310,6 +327,7 @@ processLine state b@(IRCLine l)
     | command == "SIGNON" = ircSignon state l
     | command == "HOURS" = ircHours state l
     | command == "UNHANDLEDTOGGLE" = ircUnhandledToggle state
+    | command == "QUIT" = ircQuit state
     | otherwise = (state, [])
     where
       command = map toUpper (head $ (words l))
@@ -691,6 +709,9 @@ addonSpeech state name body
     where
       stuff = ":" ++ (sanitizeName name) ++ " PRIVMSG " ++ 
               (channelName state) ++ " :" ++ (sanitizeAddonMessage state body)
+
+ircQuit :: BState -> (BState, [Line])
+ircQuit state = (state, [BridgeLine ExitClose])
 
 ircUnhandledToggle :: BState -> (BState, [Line])
 ircUnhandledToggle state = (state {echoUnhandled = newEcho},
