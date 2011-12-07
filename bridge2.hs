@@ -232,8 +232,8 @@ addonSender addonOutPipe inputPipe addonHandle = do
       where
         fun line = do
           let s = show line
-          isWritable <- hIsWritable addonHandle
-          if (not isWritable)
+          --isClosed <- hIsClosed addonHandle
+          if (False)
            then
               writeChan inputPipe (BridgeLine AddonHandleClosed)
            else
