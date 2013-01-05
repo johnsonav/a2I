@@ -3,7 +3,7 @@ import Network
 import Network.HTTP
 import System.IO
 import qualified System.Exit as X
-import Control.Exception
+import qualified Control.Exception as C
 import Control.Concurrent
 import Data.List 
 import Data.Char (toUpper)
@@ -87,7 +87,8 @@ instance Show Line where
                                                   (show f8)
 
 
-data BState = BState {myNick :: String,
+data BState = BState {myIrcNick :: String,
+                      myAddonNick :: String,
                       myPassword :: String,
 
                       server :: String,
@@ -113,21 +114,30 @@ main = do
   addonOutPipe <- newChan
   curTime <- getCurrentTime
   state <- initialBState inputPipe
-  bracket (listenOn $ PortNumber 10200) 
-              (sClose) 
-              (acceptS state inputPipe ircOutPipe addonOutPipe)
-      where
-        acceptS state inputPipe ircOutPipe addonOutPipe sock = 
-            accept sock >>= handle state inputPipe ircOutPipe addonOutPipe
-        handle state inputPipe ircOutPipe addonOutPipe (h, n, p) = do
-          let s = state --{ircHandle = h}
-          hSetBuffering h LineBuffering
-          forkIO (ircListener inputPipe h)
-          forkIO (ircSender ircOutPipe h)
-          inList <- getChanContents inputPipe
-          putStrLn "testicle"
-          sequence_ $ map (writeLine inputPipe ircOutPipe addonOutPipe) 
-                        (transformInput s inList)
+
+  socket <- listenOn $ PortNumber 10200
+  (ircHandle, _, _) <- accept socket
+  hSetBuffering ircHandle LineBuffering
+  forkIO (ircListener inputPipe ircHandle)
+  forkIO (ircSender ircOutPipe ircHandle)
+  inList <- getChanContents inputPipe
+  mapM_ (writeLine inputPipe ircOutPipe addonOutPipe) (transformInput state inList)
+
+  -- bracket (listenOn $ PortNumber 10200) 
+  --             (sClose) 
+  --             (acceptS state inputPipe ircOutPipe addonOutPipe)
+  --     where
+  --       acceptS state inputPipe ircOutPipe addonOutPipe sock = 
+  --           accept sock >>= handle state inputPipe ircOutPipe addonOutPipe
+  --       handle state inputPipe ircOutPipe addonOutPipe (h, n, p) = do
+  --         let s = state --{ircHandle = h}
+  --         hSetBuffering h LineBuffering
+  --         forkIO (ircListener inputPipe h)
+  --         forkIO (ircSender ircOutPipe h)
+  --         inList <- getChanContents inputPipe
+  --         putStrLn "testicle"
+  --         sequence_ $ map (writeLine inputPipe ircOutPipe addonOutPipe) 
+  --                       (transformInput s inList)
 
 -- This is the main function, takes a list of Line and turns it into a list of 
 -- IO actions
@@ -172,10 +182,11 @@ writeLine inputPipe ircOutPipe addonOutPipe
       url = "http://" ++ aServer ++ 
             "/current/data/rauth.php?aid=" ++ aAccountID 
             ++ "&port=" ++ (show (aPort))
-            ++ "&un=" ++ aNick
+            ++ "&un=" ++ n
             ++ "&upw=" ++ aPassword
             ++ "&sfd=" ++ (show sfd)
             ++ "&rndname=-1"
+      n = S.replace " " "%20" aNick
 
 writeLine inputPipe ircOutPipe addonOutPipe (BridgeLine StartAddonPing) = 
     forkIO (addonPingTimer inputPipe) >> return ()
@@ -194,7 +205,8 @@ writeLine inputPipe ircOutPipe addonOutPipe (BridgeLine ExitClose) =
 initialBState :: Chan Line -> IO BState
 initialBState pipe = do
   tz <- getCurrentTimeZone
-  return BState {myNick = "",
+  return BState {myIrcNick = "",
+                 myAddonNick = "",
                  myPassword = "",
                  server = "client11.addonchat.com",
                  addonPort = 8009,
@@ -217,7 +229,7 @@ httpRequest url = simpleHTTP (getRequest url) >>= getResponseBody
 ircSender :: Chan Line -> Handle -> IO ()
 ircSender ircOutPipe ircHandle = do
   output <- getChanContents ircOutPipe
-  sequence_ $ map fun output
+  mapM_ fun output
       where
         fun line = do
           let s = show line
@@ -228,24 +240,21 @@ ircSender ircOutPipe ircHandle = do
 addonSender :: Chan Line -> Chan Line -> Handle -> IO ()
 addonSender addonOutPipe inputPipe addonHandle = do
   output <- getChanContents addonOutPipe
-  sequence_ $ map fun output
+  mapM_ (fun addonHandle) output
       where
-        fun line = do
+        fun aHandle line = do
           let s = show line
-          --isClosed <- hIsClosed addonHandle
-          if (False)
-           then
-              writeChan inputPipe (BridgeLine AddonHandleClosed)
-           else
-              do
-                putStrLn $ "add<<" ++ s
-                hPutStrLn addonHandle s
+          putStrLn $ "add<<" ++ s
+
+          C.catch (hPutStrLn aHandle s) 
+                    (\pp -> (putStrLn (show (pp :: C.SomeException))) >> 
+                              (writeChan inputPipe (BridgeLine AddonHandleClosed)))
 
 -- listen for IRC traffic and pump down the pipe
 ircListener :: Chan Line -> Handle -> IO ()
 ircListener pipe h = do
   lines <- liftM ((map IRCLine) . fLines . lines) (hGetContents h)
-  sequence_ $ map (fun) lines
+  mapM_ (fun) lines
     where
       fun line = do
         putStrLn $ "irc>>" ++ (show line)
@@ -264,14 +273,39 @@ ircListener pipe h = do
   --                             writeChan pipe (IRCLine l2)
   --ircListener pipe h
 
--- listen for addon traffic and dump down pipe
+-- addonListener :: Chan Line -> Handle -> IO ()
+-- addonListener pipe h = do
+--   C.catch listen amDone
+--   --addonListener pipe h
+--     where
+--       listen = do
+--         l <- hGetLine h
+--         let l2 = S.strip l
+--         putStrLn $ "add>>" ++ l2
+--         writeChan pipe (stringToAddonLine l2)
+--         listen
+--       amDone e = do
+--         putStrLn $ "Lost Connection to Addon Server!"
+--         putStrLn $ show (e :: C.SomeException)
+--         writeChan pipe (BridgeLine AddonHandleClosed)
+
+--listen for addon traffic and dump down pipe
 addonListener :: Chan Line -> Handle -> IO()
 addonListener pipe h = do
-  line <- hGetLine h
-  let l2 = S.strip line
-  putStrLn $ "add>>" ++ l2
-  writeChan pipe (stringToAddonLine l2)
-  addonListener pipe h
+  contents <- hGetContents h
+  mapM_ (fun . S.strip) (lines contents)
+  putStrLn "err>>Connection to server lost."
+  writeChan pipe (BridgeLine AddonHandleClosed)
+    where
+      fun l = do
+        putStrLn $ "add>>" ++ l
+        writeChan pipe (stringToAddonLine l)
+
+  --line <- hGetLine h
+  --let l2 = S.strip line
+  --putStrLn $ "add>>" ++ l2
+  --writeChan pipe (stringToAddonLine l2)
+  --addonListener pipe h
 
 
 roomRejoiner :: Chan Line -> String -> Int -> IO ()
@@ -328,6 +362,8 @@ processLine state b@(IRCLine l)
     | command == "HOURS" = ircHours state l
     | command == "UNHANDLEDTOGGLE" = ircUnhandledToggle state
     | command == "QUIT" = ircQuit state
+    | command == "ANAME" = ircAName state l
+    | command == "SETNICK" = ircSetNick state l
     | otherwise = (state, [])
     where
       command = map toUpper (head $ (words l))
@@ -419,7 +455,7 @@ addonCloseRoom state number rName
           where
             fun iName = IRCLine $ ":" ++ iName ++ " PART " ++ (channelName state) ++ " :Leaving!"
             Just rm = getRoom state rName
-            userNames = filter (\x -> myNick state /= x) $ 
+            userNames = filter (\x -> myIrcNick state /= x) $ 
                         map ircUserName (userList rm)
       curRoom = myCurrentRoom state
       Just r = curRoom
@@ -459,10 +495,10 @@ addonCloseKick state rName timeReopenTomorrow timeClosedTomorrow =
 
 addonPMMessage :: BState -> AddonUserName -> String -> (BState, [Line])
 addonPMMessage state aName message
-    | aName == (myNick state) = (state, [])
+    | aName == (myAddonNick state) = (state, [])
     | otherwise = (state,
                    [IRCLine $ ":" ++ (sanitizeName aName) ++ 
-                              " PRIVMSG " ++ (myNick state) ++ " :" ++
+                              " PRIVMSG " ++ (myIrcNick state) ++ " :" ++
                               (sanitizeAddonMessage state message)]
                   )
 
@@ -477,7 +513,7 @@ addonAuthDo state num = (state,
                           BridgeLine (AddonAuth (server state)
                                                 (accountID state)
                                                 (addonPort state)
-                                                (myNick state)
+                                                (myAddonNick state)
                                                 (myPassword state)
                                                 num),
                           BridgeLine (StartAddonPing)]
@@ -496,14 +532,22 @@ addonLeet state magicNum = (state,
 
 addonLeavingRoom :: BState -> AddonUserName -> String -> (BState, [Line])
 addonLeavingRoom state aName rName 
-    | aName == (myNick state) = (state {roomMove = ""},
-                                 [IRCLine $ ":Mover NOTICE " ++
+    | aName == (myAddonNick state) = (state {roomMove = ""},
+                                 (lineFun rName) ++ [IRCLine $ ":Mover NOTICE " ++
                                             (channelName state) ++
                                             " :Now leaving " ++ rName,
                                   AddonLine 4 20 0
                                             (roomMove state) etx etx 0 0 0]
                                 )
     | otherwise = (state, [])
+    where
+      lineFun rName = map fun userNames
+          where
+            fun iName = IRCLine $ ":" ++ iName ++ 
+                        " PART " ++ (channelName state) ++ " :Leaving!"
+            Just rm = getRoom state rName
+            userNames = filter (\x -> myIrcNick state /= x) $ 
+                        map ircUserName (userList rm)
 
 addonGhostVoice :: BState -> String -> (BState, [Line])
 addonGhostVoice state message = (state,
@@ -553,7 +597,7 @@ addonUserLogin state aName = (newState,
                                                  " has logged in."]
                              )
     where
-      newState = state {usersInNoRoom = (createUser aName) : (usersInNoRoom state)}
+      newState = state {usersInNoRoom = (createUser aName state) : (usersInNoRoom state)}
 
 addonUserLogout :: BState -> AddonUserName -> (BState, [Line])
 addonUserLogout state aName 
@@ -577,8 +621,8 @@ addonUserLogout state aName
 addonRoomEnter :: BState -> AddonUserName -> String -> (BState, [Line])
 addonRoomEnter state aName rName
     | curRoom == Nothing && 
-        aName /= (myNick state) = (addUserToRoom removedState user rName, [])
-    | aName == (myNick state) = (addUserToRoom removedState user rName, 
+        aName /= (myAddonNick state) = (addUserToRoom removedState user rName, [])
+    | aName == (myAddonNick state) = (addUserToRoom removedState user rName, 
                                  [IRCLine $ ":Mover NOTICE " ++
                                             (channelName state) ++
                                             " :Now entering " ++
@@ -596,7 +640,8 @@ addonRoomEnter state aName rName
                                              (channelName state) ++
                                              " :Leaving!"]
                                            )
-    | userInRoom state (myNick state) rName = (addUserToRoom removedState user rName,
+    | userInRoom state (myAddonNick state) rName && 
+      not (userInRoom state aName rName) = (addUserToRoom removedState user rName,
                                                [IRCLine $ ":" ++
                                                           (sanitizeName aName) ++ 
                                                           " JOIN :" ++
@@ -611,7 +656,7 @@ addonRoomEnter state aName rName
 addonInitRoomComp :: BState -> AddonUserName -> String -> (BState, [Line])
 addonInitRoomComp state aName rName 
     | userExists state aName = (addUserToRoom newState u rName, [])
-    | otherwise = (addUserToRoom state (createUser aName) rName, [])
+    | otherwise = (addUserToRoom state (createUser aName state) rName, [])
     where
       (u, newState) = removeUserFromRoom state aName  
 
@@ -631,7 +676,7 @@ addonRoomExists state rName tC tO
 addonUserExists :: BState -> AddonUserName -> (BState, [Line])
 addonUserExists state aName
     | userExists state aName = (state, [])
-    | otherwise = (addUser state (createUser aName) "nowhere", [])
+    | otherwise = (addUser state (createUser aName state) "nowhere", [])
 
 addUserToRoom :: BState -> User -> String -> BState
 addUserToRoom state user rName = newRoomList user rName state
@@ -670,8 +715,10 @@ userInRoom state aName rName
       curRoom = currentRoom state aName
       Just r = curRoom
 
-createUser :: AddonUserName -> User
-createUser aName = User aName (sanitizeName aName) Here Unknown
+createUser :: AddonUserName -> BState -> User
+createUser aName state
+    | aName == (myAddonNick state) = User aName (myIrcNick state) Here Unknown
+    | otherwise = User aName (sanitizeName aName) Here Unknown
 
 userExists :: BState -> AddonUserName -> Bool
 userExists state aName = (inRooms aName) || (inList aName (usersInNoRoom state))
@@ -691,7 +738,7 @@ addUser state user rName
 
 addonAction :: BState -> AddonUserName -> String -> (BState, [Line])
 addonAction state name body
-    | name == myNick state = (state, [])
+    | name == myAddonNick state = (state, [])
     | otherwise = (state,
                    [IRCLine stuff]
                   )
@@ -702,13 +749,28 @@ addonAction state name body
 
 addonSpeech :: BState -> AddonUserName -> String -> (BState, [Line])
 addonSpeech state name body
-    | name == myNick state = (state, [])
+    | name == myAddonNick state = (state, [])
     | otherwise = (state,
                    [IRCLine stuff]
                   )
     where
       stuff = ":" ++ (sanitizeName name) ++ " PRIVMSG " ++ 
               (channelName state) ++ " :" ++ (sanitizeAddonMessage state body)
+
+ircSetNick :: BState -> String -> (BState, [Line])
+ircSetNick state line = (state {myAddonNick = n}, 
+                         [IRCLine $ ":Namer NOTICE :New Addon name set to, " ++ n])
+    where
+      n = tail $ dropWhile (/= ' ') line
+
+ircAName :: BState -> String -> (BState, [Line])
+ircAName state line = (state, 
+                       [IRCLine $ ":Namer NOTICE " ++ (channelName state) ++ " :" ++
+                                "ircNick: \"" ++ iName ++ "\" has addonNick: \"" ++
+                                aName ++ "\"."])
+    where
+      iName = (S.split " " line) !! 1
+      aName = ircToAddonName state iName
 
 ircQuit :: BState -> (BState, [Line])
 ircQuit state = (state, [BridgeLine ExitClose])
@@ -743,7 +805,7 @@ ircHours state line = (state,
 
 ircSignon :: BState -> String -> (BState, [Line])
 ircSignon state line = (state, 
-                        [IRCLine (":" ++ (myNick state) ++ 
+                        [IRCLine (":" ++ (myIrcNick state) ++ 
                                               " JOIN :" ++ (channelName state)),
                          BridgeLine (ConnectToAddon (server state) (addonPort state))]
                        )
@@ -810,7 +872,7 @@ ircNames state line
     | curRoom == Nothing = (state, [])
     | otherwise = (state, 
                               [IRCLine $ ":localhost 353 " ++
-                                                  (myNick state) ++ " = " ++
+                                                  (myIrcNick state) ++ " = " ++
                                                   (channelName state) ++ " :" ++
                                                   nameString room]
                              )
@@ -862,7 +924,7 @@ ircNick state line = (s,
                       [IRCLine $ ircJoinMessage s]
                      )
   where
-    s = state {myNick = (words line)!!1}
+    s = state {myIrcNick = (words line)!!1, myAddonNick = (words line)!!1}
   
 
 -- Find the room the user is in
@@ -876,7 +938,7 @@ currentRoom state aName
 
 -- shortcut to find where I'm at
 myCurrentRoom :: BState -> Maybe Room
-myCurrentRoom state = currentRoom state (myNick state)
+myCurrentRoom state = currentRoom state (myAddonNick state)
 
 -- unwrap the name of a room from a Maybe Room
 roomNameString :: Maybe Room -> String
@@ -963,7 +1025,7 @@ stringToAddonLine l = AddonLine f0 f1 f2 f3 f4 f5 f6 f7 f8
 
 {- Create IRC server join message for nick -}
 ircJoinMessage :: BState -> String
-ircJoinMessage state = subRegex (mkRegex "QQQQ") initMessage (myNick state)
+ircJoinMessage state = subRegex (mkRegex "QQQQ") initMessage (myIrcNick state)
 
 initMessage = ":localhost NOTICE AUTH : addonchat dealy\n:localhost 001 QQQQ :Welcome to the AddonChat/IRC gateway, QQQQ\n:localhost 002 QQQQ :Host localhost is running, barely Linux/x86_64.\n:localhost 003 QQQQ :Something\n:localhost 004 QQQQ localhost 3.0.3-1 abiswRo ntC\n:localhost 005 QQQQ PREFIX=(ohv)@%+ CHANTYPES=&# CHANMODES=,,,ntC NICKLEN=23 CHANNELLEN=23 NETWORK=AddonBridge SAFELIST CASEMAPPING=rfc1459 MAXTARGETS=1 WATCH=128 FLOOD=0/9999 :are supported by this server\n:localhost 375 QQQQ :- localhost Message Of The Day - \n:localhost 372 QQQQ :- Welcome to the AddonChat/IRC server at localhost.\n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- This server is running, barely.\n:localhost 372 QQQQ :- The newest version can't be found.\n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- You are getting this message because the server administrator has not\n:localhost 372 QQQQ :- yet had the time (or need) to change it.\n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- For those who don't know it yet, this is not quite a regular Internet\n:localhost 372 QQQQ :- Relay Chat server. Please see the site mentioned above for more\n:localhost 372 QQQQ :- information.\n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- The developers of the AddonChat/IRC Bridge hope you have a buzzing time.\n:localhost 372 QQQQ :- \n:localhost 372 QQQQ :- *\n:localhost 372 QQQQ :-  \n:localhost 372 QQQQ :- ... Buzzing, haha, get it?\n:localhost 376 QQQQ :End of MOTD\n:QQQQ!QQQQ@localhost MODE QQQQ :+s\n"
 
